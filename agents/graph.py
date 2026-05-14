@@ -56,35 +56,70 @@ def _call_llm(system_prompt: str, user_content: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Supervisor node — rule-based routing
+# Supervisor node — LLM-driven routing
 # ---------------------------------------------------------------------------
 
-_AGENT_SEQUENCE = [
-    "log_analyst",
-    "metrics_agent",
-    "root_cause_agent",
-    "remediation_agent",
-    "human_approval",
-    "report_agent",
-]
+_METRICS_SKIP_SYSTEM = """You are an incident response coordinator deciding whether to run the metrics_agent.
+
+The log_analyst has already run and produced findings. Your job: decide if running the metrics_agent
+(which reads CloudWatch error rate, latency, invocation count) would add new information, or if the
+log findings alone already make the root cause clear enough to skip straight to root_cause_agent.
+
+Skip metrics_agent when: the log findings explicitly name a specific root cause (e.g. DB connection
+pool exhausted, OOM kill, a specific dependency failure) with a clear failure chain.
+
+Run metrics_agent when: the logs show errors but the cause is ambiguous, or quantifying severity
+(spike timing, traffic volume) would materially change the RCA.
+
+Respond with ONLY one of: metrics_agent  OR  root_cause_agent"""
 
 
 def supervisor_node(state: IncidentState) -> dict:
-    current = state.get("next_agent", "log_analyst")
+    hint = state.get("next_agent", "log_analyst")
 
-    if current == "log_analyst":
-        return {"next_agent": "log_analyst"}
-    if current == "metrics_agent":
-        return {"next_agent": "metrics_agent"}
-    if current == "root_cause_agent":
-        return {"next_agent": "root_cause_agent"}
-    if current == "remediation_agent":
+    # Always respect explicit end signals (decline / done)
+    if hint == "__end__":
+        return {"next_agent": "__end__"}
+
+    has_logs        = bool(state.get("log_findings"))
+    has_root_cause  = bool(state.get("root_cause"))
+    has_remediation = bool(state.get("remediation_steps"))
+    has_report      = bool(state.get("incident_report"))
+    human_approved  = state.get("human_approved", False)
+
+    # Enforce mandatory steps in order — the LLM cannot skip these
+    if has_root_cause and not has_remediation:
+        print("[Supervisor] Enforcing: remediation_agent (mandatory after root cause)")
         return {"next_agent": "remediation_agent"}
-    if current == "human_approval":
+    if has_remediation and not has_report and not human_approved:
+        print("[Supervisor] Enforcing: human_approval (mandatory after remediation)")
         return {"next_agent": "human_approval"}
-    if current == "report_agent":
+    if human_approved and not has_report:
+        print("[Supervisor] Enforcing: report_agent (mandatory after approval)")
         return {"next_agent": "report_agent"}
-    return {"next_agent": "__end__"}
+    if has_report:
+        return {"next_agent": "__end__"}
+
+    # The one smart decision: after log_analyst, should we run metrics_agent or skip it?
+    if has_logs and hint == "metrics_agent":
+        user_prompt = f"""Log findings from the current incident:
+
+{state.get('log_findings', '')[:600]}
+
+Should we run metrics_agent for quantitative data, or do these logs already identify the root cause clearly enough?"""
+        try:
+            response = _call_llm(_METRICS_SKIP_SYSTEM, user_prompt)
+            chosen = response.strip().split()[0].rstrip(".,:")
+            if chosen in {"metrics_agent", "root_cause_agent"}:
+                print(f"[Supervisor] LLM chose: {chosen} (hint was: metrics_agent)")
+                return {"next_agent": chosen}
+            print(f"[Supervisor] LLM returned unexpected '{chosen}', following hint: metrics_agent")
+        except Exception as exc:
+            print(f"[Supervisor] LLM error ({exc}), following hint: metrics_agent")
+
+    # Default: follow sub-agent's hint
+    print(f"[Supervisor] Routing: {hint}")
+    return {"next_agent": hint}
 
 
 def route_from_supervisor(state: IncidentState) -> str:

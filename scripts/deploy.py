@@ -1,5 +1,5 @@
 """
-Week 3 deployment — runs once, idempotent (safe to re-run).
+Week 4 deployment — runs once, idempotent (safe to re-run).
 
 Creates in order:
   1. IAM execution role for both Lambdas
@@ -10,6 +10,7 @@ Creates in order:
   6. Victim app Lambda           (victim_app/handler.handler)
   7. CloudWatch Alarm            (Errors > 5 in 1 min on victim-app-prod)
   8. EventBridge rule            (Alarm ALARM → SQS sentinal-ai-incidents)
+  9. CloudWatch Dashboard        (sentinal-ai-dashboard)
 """
 
 import json
@@ -346,10 +347,17 @@ def deploy_victim_app(role_arn: str) -> str:
         zf.write(os.path.join(ROOT, "victim_app", "handler.py"), "handler.py")
     code_zip = buf.getvalue()
 
+    victim_env = {"FAIL_RATE": "0.0", "FAILURE_MODE": "random"}
+
     try:
         r = lam.get_function(FunctionName=VICTIM_NAME)
         fn_arn = r["Configuration"]["FunctionArn"]
         lam.update_function_code(FunctionName=VICTIM_NAME, ZipFile=code_zip)
+        lam.get_waiter("function_updated_v2").wait(FunctionName=VICTIM_NAME)
+        lam.update_function_configuration(
+            FunctionName=VICTIM_NAME,
+            Environment={"Variables": victim_env},
+        )
         print(f"  [UPDATE] {fn_arn}")
     except lam.exceptions.ResourceNotFoundException:
         r = lam.create_function(
@@ -360,8 +368,8 @@ def deploy_victim_app(role_arn: str) -> str:
             Code={"ZipFile": code_zip},
             Timeout=30,
             MemorySize=128,
-            Environment={"Variables": {"FAIL_RATE": "0.0"}},
-            Description="SentinelAI test target — set FAIL_RATE env var to trigger errors",
+            Environment={"Variables": victim_env},
+            Description="SentinelAI test target — set FAIL_RATE/FAILURE_MODE env vars to trigger errors",
         )
         fn_arn = r["FunctionArn"]
         waiter = lam.get_waiter("function_active_v2")
@@ -443,6 +451,83 @@ def create_eventbridge_rule(account_id: str):
     print(f"  [OK]   Target set → {queue_arn}")
 
 
+# ── 8. CloudWatch Dashboard ──────────────────────────────────────────────────
+
+DASHBOARD_NAME = "sentinal-ai-dashboard"
+
+
+def create_cloudwatch_dashboard():
+    step("CloudWatch Dashboard")
+    cw = mk("cloudwatch")
+
+    widgets = [
+        # Row 1: Victim app signals
+        {
+            "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+            "properties": {
+                "title": "Victim App — Errors",
+                "metrics": [["AWS/Lambda", "Errors", "FunctionName", VICTIM_NAME, {"stat": "Sum", "period": 60}]],
+                "view": "timeSeries", "stacked": False, "region": config.AWS_REGION,
+                "period": 60, "liveData": True,
+            },
+        },
+        {
+            "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+            "properties": {
+                "title": "Victim App — Invocations",
+                "metrics": [["AWS/Lambda", "Invocations", "FunctionName", VICTIM_NAME, {"stat": "Sum", "period": 60}]],
+                "view": "timeSeries", "stacked": False, "region": config.AWS_REGION,
+                "period": 60, "liveData": True,
+            },
+        },
+        # Row 2: SentinelAI Lambda signals
+        {
+            "type": "metric", "x": 0, "y": 6, "width": 12, "height": 6,
+            "properties": {
+                "title": "SentinelAI — Invocations",
+                "metrics": [["AWS/Lambda", "Invocations", "FunctionName", FUNCTION_NAME, {"stat": "Sum", "period": 60}]],
+                "view": "timeSeries", "stacked": False, "region": config.AWS_REGION,
+                "period": 60, "liveData": True,
+            },
+        },
+        {
+            "type": "metric", "x": 12, "y": 6, "width": 12, "height": 6,
+            "properties": {
+                "title": "SentinelAI — Duration P99 (ms)",
+                "metrics": [["AWS/Lambda", "Duration", "FunctionName", FUNCTION_NAME, {"stat": "p99", "period": 60}]],
+                "view": "timeSeries", "stacked": False, "region": config.AWS_REGION,
+                "period": 60, "liveData": True,
+            },
+        },
+        # Row 3: SQS queue depth
+        {
+            "type": "metric", "x": 0, "y": 12, "width": 12, "height": 6,
+            "properties": {
+                "title": "SQS — Messages Sent (sentinal-ai-incidents)",
+                "metrics": [["AWS/SQS", "NumberOfMessagesSent", "QueueName", "sentinal-ai-incidents", {"stat": "Sum", "period": 60}]],
+                "view": "timeSeries", "stacked": False, "region": config.AWS_REGION,
+                "period": 60, "liveData": True,
+            },
+        },
+    ]
+
+    dashboard_body = json.dumps({"widgets": widgets})
+
+    try:
+        cw.put_dashboard(DashboardName=DASHBOARD_NAME, DashboardBody=dashboard_body)
+        print(f"  [OK]   Dashboard '{DASHBOARD_NAME}' created/updated")
+        print(f"         https://console.aws.amazon.com/cloudwatch/home?region={config.AWS_REGION}#dashboards:name={DASHBOARD_NAME}")
+    except cw.exceptions.DashboardInvalidInputError as exc:
+        print(f"  [FAIL] Dashboard body invalid: {exc}")
+    except Exception as exc:
+        err = str(exc)
+        if "AccessDenied" in err or "not authorized" in err:
+            print(f"  [WARN] Skipping dashboard — IAM user needs cloudwatch:PutDashboard")
+            print(f"         Add it to the sentinal-ai-dev IAM user policy to enable this step.")
+        else:
+            print(f"  [WARN] Dashboard creation failed: {exc}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -463,12 +548,14 @@ def main():
     deploy_victim_app(role_arn)
     create_cloudwatch_alarm()
     create_eventbridge_rule(account_id)
+    create_cloudwatch_dashboard()
 
     print("\n" + "=" * 50)
-    print("  Deployment complete!")
+    print("  Week 4 deployment complete!")
     print(f"  SentinelAI Lambda : {fn_arn}")
     print(f"  Victim app        : arn:aws:lambda:{config.AWS_REGION}:{account_id}:function:{VICTIM_NAME}")
     print(f"  Alarm             : {ALARM_NAME}")
+    print(f"  Dashboard         : {DASHBOARD_NAME}")
     print()
     print("  Next: run  python scripts/trigger_test.py  to fire the alarm")
     print("=" * 50 + "\n")
