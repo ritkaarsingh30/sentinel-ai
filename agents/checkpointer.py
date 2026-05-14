@@ -14,7 +14,7 @@ def get_checkpointer():
     if config.USE_MOCK_DATA:
         return MemorySaver()
 
-    from langgraph_checkpoint_dynamodb import DynamoDBSaver
+    from langgraph_checkpoint_dynamodb.saver import DynamoDBSaver
     return DynamoDBSaver(
         client_config={"region_name": config.AWS_REGION},
         checkpoints_table_name=config.DYNAMODB_CHECKPOINT_TABLE,

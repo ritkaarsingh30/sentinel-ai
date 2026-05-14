@@ -72,9 +72,11 @@ def create_execution_role(account_id: str) -> str:
             {
                 "Effect": "Allow",
                 "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
-                           "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan"],
+                           "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan",
+                           "dynamodb:BatchWriteItem"],
                 "Resource": [
                     f"arn:aws:dynamodb:{config.AWS_REGION}:{account_id}:table/{config.DYNAMODB_CHECKPOINT_TABLE}",
+                    f"arn:aws:dynamodb:{config.AWS_REGION}:{account_id}:table/{config.DYNAMODB_CHECKPOINT_WRITES_TABLE}",
                     f"arn:aws:dynamodb:{config.AWS_REGION}:{account_id}:table/{config.DYNAMODB_INCIDENTS_TABLE}",
                 ],
             },
