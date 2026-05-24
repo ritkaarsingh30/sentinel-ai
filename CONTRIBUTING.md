@@ -1,5 +1,7 @@
 # Contributing to SentinelAI
 
+Thank you for being a part of this project! Your contribution means a lot.
+
 ## Dev environment
 
 ```bash
