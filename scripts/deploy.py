@@ -528,11 +528,154 @@ def create_cloudwatch_dashboard():
             print(f"  [WARN] Dashboard creation failed: {exc}")
 
 
+# ── 9. API Lambda + Function URL ─────────────────────────────────────────────
+
+API_NAME = "sentinal-ai-api"
+
+
+def _zip_api_code() -> bytes:
+    """Zip the files needed by the FastAPI Lambda."""
+    include = [
+        "api/__init__.py",
+        "api/main.py",
+        "config.py",
+        "state.py",
+        "agents/__init__.py",
+        "agents/graph.py",
+        "agents/checkpointer.py",
+        "tools/__init__.py",
+        "tools/cloudwatch_logs.py",
+        "tools/cloudwatch_metrics.py",
+        "tools/persistence.py",
+    ]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rel in include:
+            zf.write(os.path.join(ROOT, rel), rel)
+    return buf.getvalue()
+
+
+def _api_env_vars() -> dict:
+    return {
+        "GROQ_API_KEY":                    config.GROQ_API_KEY or "",
+        "DYNAMODB_CHECKPOINT_TABLE":       config.DYNAMODB_CHECKPOINT_TABLE,
+        "DYNAMODB_CHECKPOINT_WRITES_TABLE": config.DYNAMODB_CHECKPOINT_WRITES_TABLE,
+        "DYNAMODB_INCIDENTS_TABLE":        config.DYNAMODB_INCIDENTS_TABLE,
+        "S3_REPORTS_BUCKET":               config.S3_REPORTS_BUCKET or "",
+        "SNS_ALERT_TOPIC_ARN":             config.SNS_ALERT_TOPIC_ARN or "",
+        "USE_MOCK_DATA":                   "false",
+        "LANGCHAIN_TRACING_V2":            os.getenv("LANGCHAIN_TRACING_V2", "false"),
+        "LANGCHAIN_API_KEY":               os.getenv("LANGCHAIN_API_KEY", ""),
+        "LANGCHAIN_PROJECT":               os.getenv("LANGCHAIN_PROJECT", "sentinal-ai"),
+    }
+
+
+def deploy_api_function(role_arn: str, layer_arn: str) -> str:
+    step("API Lambda (sentinal-ai-api)")
+    lam = mk("lambda")
+    code_zip = _zip_api_code()
+    env = {"Variables": _api_env_vars()}
+
+    try:
+        r = lam.get_function(FunctionName=API_NAME)
+        fn_arn = r["Configuration"]["FunctionArn"]
+        print(f"  [UPDATE] Updating existing function...")
+        lam.update_function_code(FunctionName=API_NAME, ZipFile=code_zip)
+        lam.get_waiter("function_updated_v2").wait(FunctionName=API_NAME)
+        lam.update_function_configuration(
+            FunctionName=API_NAME,
+            Timeout=300,
+            MemorySize=512,
+            Layers=[layer_arn],
+            Environment=env,
+        )
+        lam.get_waiter("function_updated_v2").wait(FunctionName=API_NAME)
+        print(f"  [OK]   Updated: {fn_arn}")
+    except lam.exceptions.ResourceNotFoundException:
+        r = lam.create_function(
+            FunctionName=API_NAME,
+            Runtime="python3.12",
+            Role=role_arn,
+            Handler="api.main.handler",
+            Code={"ZipFile": code_zip},
+            Timeout=300,
+            MemorySize=512,
+            Layers=[layer_arn],
+            Environment=env,
+            Description="SentinelAI FastAPI approval dashboard",
+        )
+        fn_arn = r["FunctionArn"]
+        lam.get_waiter("function_active_v2").wait(FunctionName=API_NAME)
+        print(f"  [OK]   Created: {fn_arn}")
+
+    return fn_arn
+
+
+def create_api_gateway(account_id: str) -> str:
+    """Create an API Gateway HTTP API in front of the API Lambda. Returns the base URL."""
+    apigw = mk("apigatewayv2")
+    lam   = mk("lambda")
+    api_name = API_NAME
+
+    # Check if an HTTP API with this name already exists
+    existing = [a for a in apigw.get_apis()["Items"] if a["Name"] == api_name]
+    if existing:
+        api_url = existing[0]["ApiEndpoint"]
+        print(f"  [SKIP] API Gateway already exists: {api_url}")
+        return api_url
+
+    fn_arn = lam.get_function_configuration(FunctionName=API_NAME)["FunctionArn"]
+
+    r = apigw.create_api(
+        Name=api_name,
+        ProtocolType="HTTP",
+        Target=fn_arn,
+        CorsConfiguration={
+            "AllowOrigins": ["*"],
+            "AllowMethods": ["GET", "POST"],
+            "AllowHeaders": ["content-type"],
+        },
+    )
+    api_id  = r["ApiId"]
+    api_url = r["ApiEndpoint"]
+
+    # Grant API Gateway permission to invoke the Lambda
+    source_arn = f"arn:aws:execute-api:{config.AWS_REGION}:{account_id}:{api_id}/*/*"
+    try:
+        lam.add_permission(
+            FunctionName=API_NAME,
+            StatementId="apigw-invoke",
+            Action="lambda:InvokeFunction",
+            Principal="apigateway.amazonaws.com",
+            SourceArn=source_arn,
+        )
+    except lam.exceptions.ResourceConflictException:
+        pass
+
+    print(f"  [OK]   API Gateway: {api_url}")
+    return api_url
+
+
+def update_sentinal_api_url(api_url: str):
+    """Patch the main sentinal-ai Lambda env so approval email links are real URLs."""
+    step("Wiring API_BASE_URL into sentinal-ai Lambda")
+    lam = mk("lambda")
+    lam.get_waiter("function_updated_v2").wait(FunctionName=FUNCTION_NAME)
+    env = _lambda_env_vars()
+    env["API_BASE_URL"] = api_url
+    lam.update_function_configuration(
+        FunctionName=FUNCTION_NAME,
+        Environment={"Variables": env},
+    )
+    lam.get_waiter("function_updated_v2").wait(FunctionName=FUNCTION_NAME)
+    print(f"  [OK]   sentinal-ai Lambda now points approval emails to: {api_url}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     print("\n" + "=" * 50)
-    print("  SentinelAI — Week 3 Deployment")
+    print("  SentinelAI — Week 5 (Final) Deployment")
     print("=" * 50)
 
     sts = mk("sts")
@@ -550,14 +693,20 @@ def main():
     create_eventbridge_rule(account_id)
     create_cloudwatch_dashboard()
 
+    step("API Lambda + API Gateway")
+    deploy_api_function(role_arn, layer_arn)
+    api_url = create_api_gateway(account_id)
+    update_sentinal_api_url(api_url)
+
     print("\n" + "=" * 50)
-    print("  Week 4 deployment complete!")
+    print("  Deployment complete — SentinelAI is fully operational!")
     print(f"  SentinelAI Lambda : {fn_arn}")
     print(f"  Victim app        : arn:aws:lambda:{config.AWS_REGION}:{account_id}:function:{VICTIM_NAME}")
     print(f"  Alarm             : {ALARM_NAME}")
-    print(f"  Dashboard         : {DASHBOARD_NAME}")
+    print(f"  Dashboard         : https://console.aws.amazon.com/cloudwatch/home?region={config.AWS_REGION}#dashboards:name={DASHBOARD_NAME}")
+    print(f"  API (approve/decline): {api_url}")
     print()
-    print("  Next: run  python scripts/trigger_test.py  to fire the alarm")
+    print("  Run  python scripts/trigger_test.py  to fire an end-to-end test")
     print("=" * 50 + "\n")
 
 

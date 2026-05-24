@@ -97,6 +97,44 @@ def groq_key():
 
 check("Groq API key (format)", groq_key)
 
+# SentinelAI Lambda
+def sentinel_lambda():
+    lam = mk("lambda")
+    r = lam.get_function(FunctionName="sentinal-ai")
+    state = r["Configuration"]["State"]
+    assert state == "Active", f"Lambda state is {state}, expected Active"
+
+check("SentinelAI Lambda (sentinal-ai)", sentinel_lambda)
+
+# API Lambda + Function URL
+def api_lambda():
+    lam = mk("lambda")
+    lam.get_function(FunctionName="sentinal-ai-api")
+    r = lam.get_function_url_config(FunctionName="sentinal-ai-api")
+    url = r["FunctionUrl"]
+    env = lam.get_function_configuration(FunctionName="sentinal-ai")["Environment"]["Variables"]
+    api_base = env.get("API_BASE_URL", "")
+    assert api_base and "localhost" not in api_base, \
+        f"API_BASE_URL in sentinal-ai Lambda is '{api_base}' — run deploy.py to wire the real URL"
+    print(f"\n  API URL : {url}")
+
+check("API Lambda + Function URL (sentinal-ai-api)", api_lambda)
+
+# Victim app Lambda
+def victim_lambda():
+    lam = mk("lambda")
+    lam.get_function(FunctionName="victim-app-prod")
+
+check("Victim app Lambda (victim-app-prod)", victim_lambda)
+
+# CloudWatch Alarm
+def cw_alarm():
+    cw = mk("cloudwatch")
+    alarms = cw.describe_alarms(AlarmNames=["HighErrorRate-victim-app-prod"])["MetricAlarms"]
+    assert alarms, "Alarm 'HighErrorRate-victim-app-prod' not found"
+
+check("CloudWatch Alarm (HighErrorRate-victim-app-prod)", cw_alarm)
+
 # Summary
 print("\n" + "=" * 45)
 if errors:
@@ -104,4 +142,4 @@ if errors:
     print("  Fix the issues above and re-run.\n")
     sys.exit(1)
 else:
-    print("  All checks passed. Ready to run.\n")
+    print("  All checks passed. SentinelAI is fully operational.\n")
