@@ -106,19 +106,17 @@ def sentinel_lambda():
 
 check("SentinelAI Lambda (sentinal-ai)", sentinel_lambda)
 
-# API Lambda + Function URL
+# API Lambda + API Gateway URL
 def api_lambda():
     lam = mk("lambda")
     lam.get_function(FunctionName="sentinal-ai-api")
-    r = lam.get_function_url_config(FunctionName="sentinal-ai-api")
-    url = r["FunctionUrl"]
     env = lam.get_function_configuration(FunctionName="sentinal-ai")["Environment"]["Variables"]
     api_base = env.get("API_BASE_URL", "")
     assert api_base and "localhost" not in api_base, \
         f"API_BASE_URL in sentinal-ai Lambda is '{api_base}' — run deploy.py to wire the real URL"
-    print(f"\n  API URL : {url}")
+    print(f"\n  API URL : {api_base}")
 
-check("API Lambda + Function URL (sentinal-ai-api)", api_lambda)
+check("API Lambda + API Gateway (sentinal-ai-api)", api_lambda)
 
 # Victim app Lambda
 def victim_lambda():
