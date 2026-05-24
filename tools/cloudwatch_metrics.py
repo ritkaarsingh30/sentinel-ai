@@ -1,7 +1,7 @@
 """Reads CloudWatch metric datapoints for a given metric and time window.
 
 Returns real data when USE_MOCK_DATA=false (requires AWS creds).
-Returns realistic mock data when USE_MOCK_DATA=true (Week 1 local dev).
+Returns realistic mock data when USE_MOCK_DATA=true (local dev).
 """
 
 from datetime import datetime, timedelta, timezone

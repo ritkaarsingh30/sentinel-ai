@@ -1,5 +1,5 @@
 """
-Local test runner — Week 1.
+Local test runner.
 
 Simulates a CloudWatch alarm firing. Runs the full agent graph with mock data,
 pauses at human_approval, then resumes with a CLI prompt.

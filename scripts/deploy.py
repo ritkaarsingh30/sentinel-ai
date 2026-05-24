@@ -1,5 +1,5 @@
 """
-Week 4 deployment — runs once, idempotent (safe to re-run).
+SentinelAI deployment — idempotent, safe to re-run.
 
 Creates in order:
   1. IAM execution role for both Lambdas
@@ -11,6 +11,7 @@ Creates in order:
   7. CloudWatch Alarm            (Errors > 5 in 1 min on victim-app-prod)
   8. EventBridge rule            (Alarm ALARM → SQS sentinal-ai-incidents)
   9. CloudWatch Dashboard        (sentinal-ai-dashboard)
+ 10. API Lambda + API Gateway    (sentinal-ai-api)
 """
 
 import json
@@ -675,7 +676,7 @@ def update_sentinal_api_url(api_url: str):
 
 def main():
     print("\n" + "=" * 50)
-    print("  SentinelAI — Week 5 (Final) Deployment")
+    print("  SentinelAI — Deployment")
     print("=" * 50)
 
     sts = mk("sts")

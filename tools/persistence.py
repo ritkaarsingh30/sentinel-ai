@@ -1,5 +1,5 @@
 """
-Persistence helpers for Week 3.
+Persistence helpers.
 
 save_report_to_s3  — uploads the final incident report JSON to S3.
 record_incident    — writes a summary row to the DynamoDB incidents table.

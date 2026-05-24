@@ -1,7 +1,7 @@
 """Reads CloudWatch log events for a given log group and time window.
 
 Returns real data when USE_MOCK_DATA=false (requires AWS creds).
-Returns realistic mock data when USE_MOCK_DATA=true (Week 1 local dev).
+Returns realistic mock data when USE_MOCK_DATA=true (local dev).
 """
 
 import json
